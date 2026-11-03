@@ -1,0 +1,22 @@
+{
+  "schema_version": "1.0",
+  "sources": [
+    {"id":"news-doe","category":"official_discovery","query":"site:doe.gov.ph Philippines energy project OR renewable","enabled":true},
+    {"id":"news-doe-new","category":"official_discovery","query":"site:new.doe.gov.ph Philippines energy project","enabled":true},
+    {"id":"news-dict","category":"official_discovery","query":"site:dict.gov.ph OR site:dict.open.gov.ph Philippines broadband fiber project","enabled":true},
+    {"id":"news-ppp","category":"official_discovery","query":"site:ppp.gov.ph energy telecommunications project Philippines","enabled":true},
+    {"id":"news-philgeps","category":"procurement_discovery","query":"site:philgeps.gov.ph energy telecommunications procurement","enabled":true},
+    {"id":"market-energy","category":"market_discovery","query":"Philippines renewable energy project solar wind battery storage","enabled":true},
+    {"id":"market-power","category":"market_discovery","query":"Philippines power transmission grid project investment","enabled":true},
+    {"id":"market-telecom","category":"market_discovery","query":"Philippines fiber broadband 5G telecom infrastructure project","enabled":true},
+    {"id":"market-procurement","category":"market_discovery","query":"Philippines infrastructure procurement energy telecom tender","enabled":true}
+  ],
+  "official_portals": [
+    {"id":"doe","name":"Department of Energy","url":"https://doe.gov.ph/","sector":"energy"},
+    {"id":"doe-news","name":"DOE News and Updates","url":"https://doe.gov.ph/news","sector":"energy"},
+    {"id":"dict","name":"DICT Transparency Portal","url":"https://dict.open.gov.ph/","sector":"telecommunications"},
+    {"id":"ppp-center","name":"PPP Center Project Database","url":"https://ppp.gov.ph/project-database/","sector":"general"},
+    {"id":"philgeps","name":"PhilGEPS","url":"https://philgeps.gov.ph/","sector":"procurement"},
+    {"id":"erc","name":"Energy Regulatory Commission","url":"https://www.erc.gov.ph/","sector":"energy"}
+  ]
+}

@@ -1,0 +1,76 @@
+name: Collect and publish PH Infra Watch
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+  schedule:
+    # GitHub cron uses UTC: 00:17/06:17/12:17/18:17 = Asia/Manila 08:17/14:17/20:17/02:17 (last run is next calendar day). GitHub may delay scheduled jobs.
+    - cron: '17 0,6,12,18 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ph-infra-watch-pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Validate maintained records
+        run: python scripts/validate_data.py
+      - name: Check static pages and local assets
+        run: python scripts/check_site.py
+      - name: Run offline tests
+        run: python -m unittest discover -s tests -v
+      - name: Check map filter logic
+        run: |
+          node --check site/assets/app.js
+          node --check site/assets/map-logic.js
+          node --test tests/test_map_logic.cjs
+      - name: Collect public RSS discovery leads
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL }}
+          AI_MAX_RECORDS: '10'
+        run: python scripts/collect.py
+      - name: Check generated snapshot
+        run: python scripts/check_snapshot.py
+      - name: Persist last valid snapshot
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add site/data/data.json
+          if ! git diff --cached --quiet; then
+            git commit -m "[skip ci] update collected intelligence snapshot"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          fi
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+      - name: Upload site artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: site
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
