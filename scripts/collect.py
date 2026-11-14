@@ -98,7 +98,7 @@ def parse_feed(xml_bytes: bytes, source: dict[str, Any], observed_at: str | None
         published = _text(node, "pubDate") or _text(node, "published") or _text(node, "updated") or None
         results.append({
             "id": stable_id(link, title), "kind": "lead", "title": title[:400],
-            "summary": summary[:800], "summary_zh": "", "link": link,
+            "summary": summary[:800], "summary_zh": "", "title_zh": "", "link": link,
             "publisher": urllib.parse.urlsplit(link).netloc, "source_id": source["id"],
             "published_at": published, "observed_at": observed_at,
             "sector": classify_sector(f"{title} {summary}"), "region": None,

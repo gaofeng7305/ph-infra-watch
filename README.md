@@ -15,6 +15,10 @@
 - `site/companies.html`：企业档案和项目关系
 - `site/opportunities.html`：规则分析与可选 AI 机会建议
 
+## 行业动态显示
+
+`site/intelligence.html` 使用紧凑新闻列表和客户端分页。标题长度（默认 30 字符）、每页数量（默认 20）、中文副标题显示及新旧排序保存在浏览器 local storage 中。搜索和现有筛选先于分页执行；完整英文标题可通过桌面键盘/鼠标提示或移动端展开按钮查看。
+
 ## 本地运行
 
 Python 3.10+，无需第三方 Python 包。运行 JavaScript 地图逻辑测试需 Node.js（网站本身不依赖 Node 运行时）。
@@ -66,6 +70,8 @@ python scripts/collect.py
 ```
 
 GitHub 仓库中进入 Settings → Secrets and variables → Actions，新增 `OPENAI_API_KEY`。调用会产生 API 用量费用；未设置时跳过 AI。
+
+采集会优先处理当前快照中最新的新闻记录，并在 `scripts/data/title_translation_cache.json` 持久保存成功的标题翻译，以复用相同标题结果。失败的翻译不会写入缓存，可在后续任务重试。可使用 `python scripts/backfill_title_zh.py --limit 10` 对历史新闻分批补译；每次最多 50 条，只更新缺失翻译，脚本可重复运行以继续处理。没有 API key 时脚本不会调用 API 或写入快照。缓存和新闻数据都应与代码一起提交，GitHub Actions 会提交自动采集产生的更新。
 
 ## GitHub Pages
 

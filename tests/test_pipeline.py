@@ -1,7 +1,7 @@
 import json
+import tempfile
 import os
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -29,6 +29,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0]["kind"], "lead")
         self.assertEqual(records[0]["verification_status"], "unverified")
+        self.assertEqual(records[0]["title_zh"], "")
         self.assertEqual(records[0]["evidence"][0]["url"], "https://news.example/solar")
 
     def test_rss_parser_drops_cms_untitled_placeholders(self):
@@ -81,11 +82,54 @@ class PipelineTests(unittest.TestCase):
     def test_ai_schemas_and_grounding_guards(self):
         self.assertTrue(ai_assist.EXTRACTION_SCHEMA["required"])
         self.assertFalse(ai_assist.EXTRACTION_SCHEMA["additionalProperties"])
+        self.assertIn("title_zh", ai_assist.EXTRACTION_SCHEMA["properties"])
         for unsupported in ("budget", "capacity", "procurement_demand"):
             self.assertNotIn(unsupported, ai_assist.EXTRACTION_SCHEMA["properties"])
         self.assertTrue(ai_assist._numbers_are_grounded("500 MW", "A 500 MW plan"))
         self.assertFalse(ai_assist._numbers_are_grounded("500 MW", "A project plan"))
         self.assertEqual(ai_assist._grounded_candidates(["DOE", "Invented Corp"], "DOE report"), ["DOE"])
+
+    def test_title_translation_validation_rejects_empty_english_oversized_and_controls(self):
+        self.assertEqual(ai_assist.validate_title_translation("太阳能项目", "Solar project"), "太阳能项目")
+        self.assertEqual(ai_assist.validate_title_translation("菲律宾将建设20个电站", "Philippines plans 10 power plants"), "")
+        for bad in ("", "Solar project", "中" * 181, "中文\u0001伪造", None):
+            self.assertEqual(ai_assist.validate_title_translation(bad, "Solar project"), "")
+        self.assertTrue(ai_assist.contains_chinese("菲律宾能源"))
+        self.assertFalse(ai_assist.contains_chinese("Energy project"))
+
+    def test_title_translation_is_cached_and_skips_chinese_originals(self):
+        items=[{"title":"Solar project update"},{"title":" solar   project update "},{"title":"新闻标题"},{"title":"Cached title","title_zh":"已有翻译"}]
+        response={"output_text":json.dumps({"title_zh":"太阳能项目动态"},ensure_ascii=False)}
+        with tempfile.TemporaryDirectory() as temp:
+            cache=Path(temp)/"translations.json"
+            with patch.object(ai_assist,"_request",return_value=response) as request:
+                count=ai_assist.translate_titles(items,limit=5,api_key="test-only",cache_path=cache)
+            duplicate=[{"title":" solar   project update "}]
+            with patch.object(ai_assist,"_request",side_effect=AssertionError("cache should avoid API call")):
+                self.assertEqual(ai_assist.translate_titles(duplicate,api_key="test-only",cache_path=cache),0)
+            self.assertEqual(duplicate[0]["title_zh"],"太阳能项目动态")
+        self.assertEqual(count,1);self.assertEqual(items[0]["title"],"Solar project update")
+        self.assertEqual(items[0]["title_zh"],"太阳能项目动态");self.assertEqual(items[1]["title_zh"],"太阳能项目动态");self.assertEqual(request.call_count,1)
+
+    def test_title_translation_api_failure_can_be_retried(self):
+        with tempfile.TemporaryDirectory() as temp:
+            cache=Path(temp)/"translations.json"
+            items=[{"title":"Fiber network update"}]
+            with patch.object(ai_assist,"_request",side_effect=RuntimeError("offline")):
+                self.assertEqual(ai_assist.translate_titles(items,api_key="test-only",cache_path=cache),0)
+            response={"output_text":json.dumps({"title_zh":"光纤网络动态"},ensure_ascii=False)}
+            with patch.object(ai_assist,"_request",return_value=response) as request:
+                self.assertEqual(ai_assist.translate_titles(items,api_key="test-only",cache_path=cache),1)
+            self.assertEqual(items[0]["title_zh"],"光纤网络动态")
+            self.assertEqual(request.call_count,1)
+
+    def test_title_translation_without_key_or_on_api_failure_is_nonfatal(self):
+        items=[{"title":"Fiber network update"}]
+        with patch.dict(os.environ,{"OPENAI_API_KEY":""}):
+            self.assertEqual(ai_assist.translate_titles(items),0)
+        with patch.object(ai_assist,"_request",side_effect=RuntimeError("offline")):
+            self.assertEqual(ai_assist.translate_titles(items,api_key="test-only"),0)
+        self.assertNotIn("title_zh",items[0])
 
     def test_ai_enrichment_keeps_only_grounded_candidates_and_source(self):
         item = {"id": "lead-1", "title": "DOE solar project", "summary": "DOE plans solar equipment", "link": "https://news.example/a", "publisher": "news.example", "observed_at": "2026-11-03T00:00:00Z", "evidence": [], "verification_status": "unverified"}

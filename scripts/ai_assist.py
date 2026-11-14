@@ -4,17 +4,37 @@ import json
 import os
 import urllib.request
 import re
+import unicodedata
+from pathlib import Path
 
 ENDPOINT = "https://api.openai.com/v1/responses"
+TRANSLATION_CACHE = Path(__file__).resolve().parent / "data" / "title_translation_cache.json"
+
+def _title_cache_key(title: str) -> str:
+    return " ".join(unicodedata.normalize("NFKC", title).split()).casefold()
+
+def _load_title_cache(path: Path = TRANSLATION_CACHE) -> dict[str, str]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        return {str(k): v for k, v in value.items() if isinstance(v, str) and v} if isinstance(value, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+def _write_title_cache(cache: dict[str, str], path: Path = TRANSLATION_CACHE) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(".tmp-" + path.name)
+    temporary.write_text(json.dumps(cache, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temporary.replace(path)
 
 EXTRACTION_SCHEMA = {
     "type": "object", "additionalProperties": False,
     "properties": {
+        "title_zh": {"type": "string"},
         "summary_zh": {"type": "string"},
         "tags": {"type": "array", "items": {"type": "string"}, "maxItems": 5},
         "candidate_entities": {"type": "array", "items": {"type": "string"}, "maxItems": 5},
         "candidate_locations": {"type": "array", "items": {"type": "string"}, "maxItems": 5}
-    }, "required": ["summary_zh", "tags", "candidate_entities", "candidate_locations"]
+    }, "required": ["title_zh", "summary_zh", "tags", "candidate_entities", "candidate_locations"]
 }
 OPPORTUNITY_SCHEMA = {
     "type": "object", "additionalProperties": False,
@@ -43,6 +63,76 @@ def _numbers_are_grounded(text: str, source_text: str) -> bool:
     source_numbers = set(re.findall(r"(?<![\w])\d[\d,.]*(?:\s?(?:%|mw|gw|kw|km|php|usd|million|billion))?", source_text, re.I))
     return numbers <= source_numbers
 
+def contains_chinese(text: str) -> bool:
+    return any("CJK" in unicodedata.name(char, "") or "IDEOGRAPH" in unicodedata.name(char, "") for char in text)
+
+def validate_title_translation(value, original: str) -> str:
+    if not isinstance(value, str):
+        return ""
+    title = " ".join(value.split()).strip()
+    if not title or len(title) > 180 or title.casefold() == (original or "").strip().casefold():
+        return ""
+    if not contains_chinese(title) or any(unicodedata.category(char).startswith("C") for char in title):
+        return ""
+    original_numbers = re.findall(r"\d[\d,.]*", original or "")
+    translated_numbers = re.findall(r"\d[\d,.]*", title)
+    if original_numbers != translated_numbers:
+        return ""
+    return title
+
+TITLE_TRANSLATION_SCHEMA = {
+    "type": "object", "additionalProperties": False,
+    "properties": {"title_zh": {"type": "string"}}, "required": ["title_zh"]
+}
+
+def translate_titles(items: list[dict], limit: int = 10, api_key: str | None = None, model: str | None = None,
+                     cache_path: Path = TRANSLATION_CACHE) -> int:
+    """Fill missing Chinese titles, preserving originals and failing per-item without raising."""
+    cache = _load_title_cache(cache_path)
+    for item in items:
+        title = item.get("title", "")
+        if isinstance(title, str) and title and not item.get("title_zh") and cache.get(_title_cache_key(title)):
+            item["title_zh"] = cache[_title_cache_key(title)]
+            item["title_zh_ai"] = True
+    key = (api_key if api_key is not None else os.environ.get("OPENAI_API_KEY", "")).strip()
+    if not key:
+        return 0
+    model = model or os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
+    candidates = [item for item in items if isinstance(item.get("title"), str) and item.get("title", "").strip()
+                  and not contains_chinese(item["title"]) and not item.get("title_zh")]
+    # Reuse successful translations across duplicate headlines and collection runs.
+    uncached: dict[str, list[dict]] = {}
+    for item in candidates:
+        cache_key = _title_cache_key(item["title"])
+        cached = cache.get(cache_key)
+        if cached:
+            item["title_zh"] = cached
+            item["title_zh_ai"] = True
+            item["title_zh_model"] = model
+        else:
+            uncached.setdefault(cache_key, []).append(item)
+    processed = 0
+    for cache_key, duplicates in list(uncached.items())[:max(0, min(50, int(limit)))]:
+        item = duplicates[0]
+        prompt = {"title": item["title"][:400]}
+        payload = {"model": model, "instructions": "Translate this news headline into concise, accurate Simplified Chinese. Return only title_zh. Preserve names and all numbers exactly. Do not add facts, context, or claims. If uncertain, return an empty string.", "input": json.dumps(prompt, ensure_ascii=False), "max_output_tokens": 100}
+        try:
+            answer = json.loads(_output_text(_request(_payload_schema(payload, "news_title_translation", TITLE_TRANSLATION_SCHEMA), key)))
+            translation = validate_title_translation(answer.get("title_zh"), item["title"])
+            if translation:
+                for duplicate in duplicates:
+                    duplicate["title_zh"] = translation
+                    duplicate["title_zh_ai"] = True
+                    duplicate["title_zh_model"] = model
+                cache[cache_key] = translation
+                processed += 1
+        except Exception:
+            # Translation failures are optional and never interrupt collection or backfill.
+            continue
+    if cache:
+        _write_title_cache(cache, cache_path)
+    return processed
+
 def _request(payload: dict, api_key: str) -> dict:
     request = urllib.request.Request(ENDPOINT, data=json.dumps(payload).encode("utf-8"), method="POST",
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"})
@@ -61,6 +151,12 @@ def _output_text(response: dict) -> str:
 
 def enrich(snapshot: dict) -> dict:
     key = os.environ.get("OPENAI_API_KEY", "").strip()
+    title_cache = _load_title_cache()
+    for item in snapshot.get("items", []):
+        title = item.get("title", "")
+        if isinstance(title, str) and title and not item.get("title_zh") and title_cache.get(_title_cache_key(title)):
+            item["title_zh"] = title_cache[_title_cache_key(title)]
+            item["title_zh_ai"] = True
     if not key:
         snapshot["ai_status"] = {"status": "disabled", "message": "OPENAI_API_KEY is not configured; core functions remain available."}
         return snapshot
@@ -71,12 +167,19 @@ def enrich(snapshot: dict) -> dict:
     model = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
     processed = 0
     for item in snapshot.get("items", [])[:limit]:
+        cache_key = _title_cache_key(item.get("title", "")) if item.get("title") else ""
+        if cache_key and not item.get("title_zh") and title_cache.get(cache_key):
+            item["title_zh"] = title_cache[cache_key]
+            item["title_zh_ai"] = True
+            item["title_zh_model"] = model
+        if item.get("title_zh") or contains_chinese(item.get("title", "")):
+            pass
         if item.get("summary_zh"):
             continue
         source = {"title": item.get("title", ""), "summary": item.get("summary", "")[:800]}
         payload = {
             "model": model,
-            "instructions": "You assist a public infrastructure intelligence site. Return JSON only with summary_zh (a concise Chinese summary), tags (zero to five topic labels), candidate_entities (zero to five names explicitly present in the text), and candidate_locations (zero to five place names explicitly present in the text). Use only the provided title and short summary. All extracted entities/locations are unverified candidates, not facts. Do not infer project truth, amount, capacity, stage, tender status, dates, companies, or locations. If unsupported, return an empty list or empty string.",
+            "instructions": "You assist a public infrastructure intelligence site. Return JSON only with title_zh (a concise accurate Chinese translation of the title, or empty if uncertain), summary_zh (a concise Chinese summary), tags (zero to five topic labels), candidate_entities (zero to five names explicitly present in the text), and candidate_locations (zero to five place names explicitly present in the text). Use only the provided title and short summary. Preserve names and numbers in title translation. All extracted entities/locations are unverified candidates, not facts. Do not infer project truth, amount, capacity, stage, tender status, dates, companies, or locations. If unsupported, return an empty list or empty string.",
             "input": json.dumps(source, ensure_ascii=False),
             "max_output_tokens": 180
         }
@@ -85,6 +188,13 @@ def enrich(snapshot: dict) -> dict:
             response = _request(payload, key)
             answer = json.loads(_output_text(response))
             summary = answer.get("summary_zh", "")
+            title_zh = validate_title_translation(answer.get("title_zh"), source["title"])
+            if title_zh and not item.get("title_zh"):
+                item["title_zh"] = title_zh
+                item["title_zh_ai"] = True
+                item["title_zh_model"] = model
+            if title_zh and cache_key:
+                title_cache[cache_key] = title_zh
             if isinstance(summary, str) and _numbers_are_grounded(summary, f"{source['title']} {source['summary']}"):
                 entities = _grounded_candidates(answer.get("candidate_entities"), f"{source['title']} {source['summary']}")
                 locations = _grounded_candidates(answer.get("candidate_locations"), f"{source['title']} {source['summary']}")
@@ -140,5 +250,7 @@ def enrich(snapshot: dict) -> dict:
             analyzed += 1
         except Exception as exc:
             opportunity["ai_error"] = str(exc).replace("\n", " ")[:160]
+    if title_cache:
+        _write_title_cache(title_cache)
     snapshot["ai_status"] = {"status": "ok" if processed or analyzed else "no_output", "processed": processed, "analyzed_opportunities": analyzed, "model": model}
     return snapshot
